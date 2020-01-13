@@ -1,169 +1,189 @@
-import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 import random
-import gym
-import numpy as np
-from collections import deque
-from tensorflow import keras
-from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.layers import Input, Dense
-from tensorflow.keras.optimizers import Adam, RMSprop
-from tensorflow.keras.models import Sequential
+import math
 import matplotlib.pyplot as plt
 
+import torch
+from torch import nn
+import torch.nn.functional as F
+import gym
 
-def OurModel(input_shape, action_space):
-    X_input = Input(input_shape)
+class DQN(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(DQN, self).__init__()
+        self.linear1 = nn.Linear(input_dim, 16)
+        # self.linear2 = nn.Linear(16, 32)
+        # self.linear3 = nn.Linear(32, 32)
+        self.linear4 = nn.Linear(16, output_dim)
 
-    # 'Dense' is the basic form of a neural network layer
-    # Input Layer of state size(4) and Hidden Layer with 512 nodes
-    X = Dense(512, input_shape=input_shape, activation="relu", kernel_initializer='he_uniform')(X_input)
 
-    # Hidden layer with 256 nodes
-    X = Dense(256, activation="relu", kernel_initializer='he_uniform')(X)
+    def forward(self, x):
+        x = F.relu(self.linear1(x))
+        # x = F.relu(self.linear2(x))
+        # x = F.relu(self.linear3(x))
+        return self.linear4(x)
 
-    # Hidden layer with 64 nodes
-    X = Dense(64, activation="relu", kernel_initializer='he_uniform')(X)
 
-    # Output Layer with # of actions: 2 nodes (left, right)
-    X = Dense(action_space, activation="linear", kernel_initializer='he_uniform')(X)
+final_epsilon = 0.0001
+initial_epsilon = 0.85
+epsilon_decay = 5000
+global steps_done
+steps_done = 0
 
-    model = Model(inputs = X_input, outputs = X, name='CartPoleDQNmodel')
-    model.compile(loss="mse", optimizer=RMSprop(lr=0.001, rho=0.95, epsilon=0.01), metrics=["accuracy"])
 
-    model.summary()
-    return model
+def select_action(state):
+    global steps_done
+    sample = random.random()
+    eps_threshold = final_epsilon + (initial_epsilon - final_epsilon) * \
+                    math.exp(-1. * steps_done / epsilon_decay)
+    if sample > eps_threshold:
+        with torch.no_grad():
+            state = torch.Tensor(state)
+            steps_done += 1
+            q_calc = model(state)
+            node_activated = int(torch.argmax(q_calc))
+            return node_activated
+    else:
+        node_activated = random.randint(0,1)
+        steps_done += 1
+        return node_activated
 
-class DQNAgent:
-    def __init__(self):
-        self.env = gym.make('CartPole-v1')
-        # by default, CartPole-v1 has max episode steps = 500
-        self.state_size = self.env.observation_space.shape[0]
-        self.action_size = self.env.action_space.n
-        self.EPISODES = 100
-        self.memory = deque(maxlen=200)
 
-        self.gamma = 0.75    # discount rate
-        self.epsilon = 1.0  # exploration rate
-        self.epsilon_min = 0.0001
-        self.epsilon_decay = 0.999
-        self.batch_size = 32#64
-        self.train_start = 100
+class ReplayMemory(object): # Stores [state, reward, action, next_state, done]
 
-        # create main model
-        self.model = OurModel(input_shape=(self.state_size,), action_space = self.action_size)
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.memory = [[],[],[],[],[]]
 
-    def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
-        if len(self.memory) > self.train_start:
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay
+    def push(self, data):
+        """Saves a transition."""
+        for idx, point in enumerate(data):
+            #print("Col {} appended {}".format(idx, point))
+            self.memory[idx].append(point)
 
-    def act(self, state):
-        if np.random.random() <= self.epsilon:
-            return random.randrange(self.action_size)
+    def sample(self, batch_size):
+        rows = random.sample(range(0, len(self.memory[0])), batch_size)
+        experiences = [[],[],[],[],[]]
+        for row in rows:
+            for col in range(5):
+                experiences[col].append(self.memory[col][row])
+        return experiences
+
+    def __len__(self):
+        return len(self.memory[0])
+
+
+input_dim, output_dim = 4, 2
+model = DQN(input_dim, output_dim)
+target_net = DQN(input_dim, output_dim)
+target_net.load_state_dict(model.state_dict())
+target_net.eval()
+tau = 1000
+discount = 0.85
+
+learning_rate = 1e-2
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+memory = ReplayMemory(65536)
+BATCH_SIZE = 128
+
+
+def optimize_model():
+    if len(memory) < BATCH_SIZE:
+        return 0
+    experiences = memory.sample(BATCH_SIZE)
+    state_batch = torch.Tensor(experiences[0])
+    action_batch = torch.LongTensor(experiences[1]).unsqueeze(1)
+    reward_batch = torch.Tensor(experiences[2])
+    next_state_batch = torch.Tensor(experiences[3])
+    done_batch = experiences[4]
+
+    pred_q = model(state_batch).gather(1, action_batch)
+
+    next_state_q_vals = torch.zeros(BATCH_SIZE)
+
+    for idx, next_state in enumerate(next_state_batch):
+        if done_batch[idx] == True:
+            next_state_q_vals[idx] = -1
         else:
-            return np.argmax(self.model.predict(state))
-
-    def replay(self):
-        if len(self.memory) < self.train_start:
-            return
-        # Randomly sample minibatch from the memory
-        minibatch = random.sample(self.memory, min(len(self.memory), self.batch_size))
-
-        state = np.zeros((self.batch_size, self.state_size))
-        next_state = np.zeros((self.batch_size, self.state_size))
-        action, reward, done = [], [], []
-
-        # do this before prediction
-        # for speedup, this could be done on the tensor level
-        # but easier to understand using a loop
-        for i in range(self.batch_size):
-            state[i] = minibatch[i][0]
-            action.append(minibatch[i][1])
-            reward.append(minibatch[i][2])
-            next_state[i] = minibatch[i][3]
-            done.append(minibatch[i][4])
-
-        # do batch prediction to save speed
-        target = self.model.predict(state)
-        target_next = self.model.predict(next_state)
-
-        for i in range(self.batch_size):
-            # correction on the Q value for the action used
-            if done[i]:
-                target[i][action[i]] = reward[i]
-            else:
-                # Standard - DQN
-                # DQN chooses the max Q value among next actions
-                # selection and evaluation of action is on the target Q Network
-                # Q_max = max_a' Q_target(s', a')
-                target[i][action[i]] = reward[i] + self.gamma * (np.amax(target_next[i]))
-
-        # Train the Neural Network with batches
-        self.model.fit(state, target, batch_size=self.batch_size, verbose=0)
+            # .max in pytorch returns (values, idx), we only want vals
+            next_state_q_vals[idx] = (target_net(next_state_batch[idx]).max(0)[0]).detach()
 
 
-    def load(self, name):
-        self.model = load_model(name)
+    better_pred = (reward_batch + next_state_q_vals).unsqueeze(1)
 
-    def save(self, name):
-        self.model.save(name)
+    loss = F.smooth_l1_loss(pred_q, better_pred)
+    optimizer.zero_grad()
+    loss.backward()
+    for param in model.parameters():
+        param.grad.data.clamp_(-1, 1)
+    optimizer.step()
+    return loss
 
-    def run(self):
-        scores_array = []
-        for e in range(self.EPISODES):
-            state = self.env.reset()
-            state = np.reshape(state, [1, self.state_size])
-            done = False
-            i = 0
-            while not done:
-                self.env.render()
-                action = self.act(state)
-                next_state, reward, done, _ = self.env.step(action)
-                next_state = np.reshape(next_state, [1, self.state_size])
-                if not done or i == self.env._max_episode_steps-1:
-                    reward = reward
-                else:
-                    reward = -100
 
-                self.remember(state, action, reward, next_state, done)
-                state = next_state
-                i += 1
-                if done:
-                    if e % 10 == 0:
-                        print("episode: {}/{}, score: {}, e: {:.2}".format(e, self.EPISODES, i, self.epsilon))
-                        scores_array.append(i)
-                    # if i == 500:
-                    #     print("Saving trained model as cartpole-dqn.h5")
-                    #     self.save("cartpole-dqn.h5")
-                    #     return
+points = []
+losspoints = []
+episodes = 500
+#save_state = torch.load("models/DQN_target_11.pth")
+#model.load_state_dict(save_state['state_dict'])
+#optimizer.load_state_dict(save_state['optimizer'])
 
-                self.replay()
-        plt.plot(scores_array)
-        plt.title('Scores per epochs of {} episodes'.format(self.EPISODES))
-        plt.xlabel('episode epochs'), plt.ylabel('scores')
-        plt.show()
 
-    def test(self):
-        self.load("cartpole-dqn.h5")
-        for e in range(self.EPISODES):
-            state = self.env.reset()
-            state = np.reshape(state, [1, self.state_size])
-            done = False
-            i = 0
-            while not done:
-                self.env.render()
-                action = np.argmax(self.model.predict(state))
-                next_state, reward, done, _ = self.env.step(action)
-                state = np.reshape(next_state, [1, self.state_size])
-                i += 1
-                if done:
-                    if e % 50 == 0:
-                        print("episode: {}/{}, score: {}".format(e, self.EPISODES, i))
-                    break
 
-if __name__ == "__main__":
-    agent = DQNAgent()
-    agent.run()
-    #agent.test()
+env = gym.make('CartPole-v0')
+for i_episode in range(episodes):
+    observation = env.reset()
+    episode_loss = 0
+    if i_episode % tau == 0:
+        target_net.load_state_dict(model.state_dict())
+    for t in range(100):
+        #env.render()
+        state = observation
+        action = select_action(observation)
+        observation, reward, done, _ = env.step(action)
+
+        if done:
+            next_state = [0,0,0,0]
+        else:
+            next_state = observation
+
+        memory.push([state, action, reward, next_state, done])
+        episode_loss = episode_loss + float(optimize_model())
+        if done:
+            timesteps = t+1
+            average_loss = episode_loss/timesteps
+            points.append((i_episode, timesteps))
+            print('\nEpisode {} done in {} timesteps'.format(i_episode, timesteps))
+            print('Average loss: {0:.4f}'.format(average_loss))
+            losspoints.append((i_episode, average_loss))
+            if (i_episode % 10 == 0):
+                eps = final_epsilon + (initial_epsilon - final_epsilon) * \
+                    math.exp(-1. * steps_done / epsilon_decay)
+                print('-'*30)
+                print('Current Epsilon value: {0:.4g}'.format(eps))
+                print('-'*30)
+            if ((i_episode+1) % (episodes+1) == 0):
+                save = {'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}
+                torch.save(save, "models/DQN_target_" + str(i_episode // episodes) + ".pth")
+            break
+env.close()
+
+
+
+
+x = [coord[0] for coord in points]
+y = [coord[1] for coord in points]
+
+x2 = [coord[0] for coord in losspoints]
+y2 = [coord[1] for coord in losspoints]
+
+# plt.plot(x, y, label = 'time steps', color = 'blue'), plt.plot(x2, y2, label = 'loss', color = 'red')
+# plt.title('Rates per {} episodes.'.format(episodes)), plt.xlabel('episodes')
+# plt.grid(True)
+# plt.legend()
+# plt.show()
+
+plt.plot(x2, y2, label = 'loss', color = 'red')
+plt.title('LOSS per {} episodes.'.format(episodes)), plt.xlabel('episodes'), plt.ylabel('loss')
+plt.grid(True)
+plt.legend()
+plt.show()
