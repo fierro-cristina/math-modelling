@@ -1,128 +1,160 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+arms_num = 10
+expected = np.random.randint(0, arms_num, arms_num)
+variance = np.around(np.random.rand(arms_num), decimals = 4)
+std = np.sqrt(variance)
+arms_rewards = np.array([np.random.normal(expected[i], std[i], 1)[0] for i in range(arms_num)])
+arms_mu = np.around(arms_rewards, decimals = 3)
+epsilon = np.array([0, 0.1, 0.01, 0.4])
+Q_0 = np.array([1, 1.5, 2, 5])
+c = np.array([1, 2, 10])
+
 class Agent:
-    def __init__(self, k = 10, exploration_rate = 0.3, learning_rate = 0.1, ucb = False, seed = None, c = 2):
-        self.k = k #number of agents initialized
-        self.actions = range(self.k)
-        self.exploration_rate = exploration_rate
-        self.learning_rate = learning_rate
-        self.total_reward = 0
-        self.average_reward = []
+    def __init__(self, **kwargs):
+        for i, j in kwargs.items():
+            setattr(self, i, j)
 
-        self.end_value = []
-        np.random.seed(seed)
-        #The reward is randomly generated from the normal distribution.
-        for i in range(self.k):
-            self.end_value.append(np.random.randn() + 2) #normal distribution
+        self.k = 10
+        self.n = 1
+        self.k_n = np.ones(self.k)
+        self.mean_reward = 0
+        self.reward = np.zeros(self.iters)
+        self.k_reward = np.zeros(self.k)
+        self.mu = self.calcMu()
 
-        self.values = np.zeros(self.k)
-        self.times = 0
-        self.action_times = np.zeros(self.k)
+    def calcMu(self):
+        expected = np.random.randint(0, self.k, self.k)
+        variance = np.around(np.random.rand(self.k), decimals = 4)
+        std = np.sqrt(variance)
+        arms_rewards = np.array([np.random.normal(expected[i], std[i], 1)[0] for i in range(self.k)])
+        arms_mu = np.around(arms_rewards, decimals = 3)
+        self.q_max = std[np.argmax(arms_mu)] + max(arms_mu)
 
-        self.ucb = ucb
-        self.c = c
+        return arms_mu
 
-#Choosing actions condenses down to two methods: e-greedy and ucb (Upper Confodence Bound)
-    def chooseAction(self):
-        #Exploration
-        if np.random.uniform(0,1) <= self.exploration_rate:
-            action = np.random.choice(self.actions)
+    def Reward(self):
+        i = int(self.current_arm)
+        if i == len(self.mu):
+            print('current arm: %s\n%s'%(i, self.current_arm))
+        reward = np.random.normal(self.mu[i], 1)
+
+        self.n += 1
+        self.k_n[i] += 1
+        self.mean_reward = self.mean_reward + (reward - self.mean_reward)/self.n
+        self.k_reward[i] = self.k_reward[i] + (reward - self.k_reward[i])/self.k_n[i]
+
+    def Play(self):
+        for i in range(self.iters):
+            self.select_arm()
+            self.Reward()
+            self.reward[i] = self.mean_reward
+
+    def Reset(self):
+        self.n = 1
+        self.k_n = np.ones(self.k)
+        self.mean_reward = 0
+        self.reward = np.zeros(self.iters)
+        self.k_reward = np.zeros(self.k)
+        self.mu = self.calcMu()
+
+class e_greedy(Agent):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def select_arm(self):
+        if np.random.rand() > self.eps:
+            self.current_arm = self.k_reward.argmax()
         else:
-        #Exploitation
-            if self.ucb:
-                if self.times == 0:
-                    action = np.random.choice(self.actions)
-                else:
-                    confidence_bound = self.values + self.c * np.sqrt(np.log(self.times) / (self.action_times + 0.1))
-                    action = np.argmax(confidence_bound)
-            else:
-                action = np.argmax(self.values)
-        return action
+            self.current_arm = np.random.choice(range(len(self.k_reward)))
 
-    def takeAction(self, action):
-        self.times += 1
-        self.action_times[action] += 1
+class Optimistic(Agent):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.reward.fill(self.q_0)
 
-        reward = np.random.randn() + self.end_value[action]
+    def select_arm(self):
+        self.current_arm = self.k_reward.argmax()
 
-        self.values[action] += self.learning_rate * (reward - self.values[action])
+class UCB(Agent):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
-        self.total_reward += reward
-        self.average_reward.append(self.total_reward/self.times)
+    def select_arm(self):
+        self.current_arm = np.argmax(self.k_reward + self.c * np.sqrt((np.log(self.n))/self.k_n))
 
-    def Act(self, n):
-        for _ in range(n):
-            action = self.chooseAction()
-            self.takeAction(action)
+def Start(params, alg = 'epsilon', mu = arms_mu, iters = 1000, episodes = 1000):
+    if alg == 'e-greedy':
+        stats = {}
+        print('-'*40)
+        print('Method: e-greedy')
+        for i in params['eps']:
+            greed_rewards = np.zeros(iters)
+            greed = e_greedy(eps = i, mu = arms_mu, iters = iters)
 
-if __name__ == "__main__":
-    agent = Agent(k = 5, exploration_rate = 0, seed = 1234) #e-greedy
-    agent.Act(2000)
+            for j in range(episodes):
+                greed.Play()
+                greed_rewards = greed_rewards + (greed.reward - greed_rewards) / (j + 1)
+                greed.Reset()
 
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
+            stats[i] = greed_rewards
+            print('epsilon:', i)
+        plot_agents(alg, params['eps'], stats, episodes)
+    elif alg == 'Optimistic':
+        stats = {}
+        leg = []
+        print('-'*40)
+        print('Method: Optimistic')
+        for i in [1, 1.5, 2, 5]:
+            optimistic_rewards = np.zeros(iters)
+            optimistic = Optimistic(q_0 = i, mu = arms_mu, iters = iters)
+            optimistic.q_0 = optimistic.q_max*i
 
-    average_reward_1 = agent.average_reward
+            for j in range(episodes):
+                optimistic.Play()
+                optimistic_rewards = optimistic_rewards + (optimistic.reward - optimistic_rewards)/(j+1)
+                optimistic.Reset()
 
-    agent = Agent(k = 5, exploration_rate = 0.01, seed = 1234) #e-greedy
-    agent.Act(2000)
+            stats[optimistic.q_0] = optimistic_rewards
+            print('Q_0: %.3f' % (optimistic.q_0))
+            leg.append(optimistic.q_0)
 
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
+        plot_agents(alg, leg, stats, episodes)
+    elif alg == 'UCB':
+        stats = {}
+        print('-'*40)
+        print('Method: UCB')
+        for i in params['c']:
+            ucb_rewards = np.zeros(iters)
+            ucb = UCB(c = i, mu = arms_mu, iters = iters)
 
-    average_reward_2 = agent.average_reward
+            for j in range(episodes):
+                ucb.Play()
+                ucb_rewards = ucb_rewards + (ucb.reward - ucb_rewards)/(j + 1)
 
-    agent = Agent(k = 5, exploration_rate = 0.1, seed = 1234) #e-greedy
-    agent.Act(2000)
+                ucb.Reset()
 
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
+            stats[i] = ucb_rewards
+            print('c: ', i)
+        plot_agents(alg, params['c'], stats, episodes)
 
-    average_reward_3 = agent.average_reward
-
-    agent = Agent(k = 5, exploration_rate = 0.4, seed = 1234) #e-greedy
-    agent.Act(2000)
-
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
-
-    average_reward_4 = agent.average_reward
-
-    agent = Agent(k = 5, exploration_rate = 0.1, seed = 1234, ucb = True, c = 1)
-    agent.Act(2000)
-
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
-
-    average_reward_5 = agent.average_reward
-
-    agent = Agent(k = 5, exploration_rate = 0.1, seed = 1234, ucb = True, c = 2)
-    agent.Act(2000)
-
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
-
-    average_reward_6 = agent.average_reward
-
-    agent = Agent(k = 5, exploration_rate = 0.1, seed = 1234, ucb = True, c = 10)
-    agent.Act(2000)
-
-    print("Estimated Values: ", agent.values)
-    print("Actual Values: ", agent.end_value)
-
-    average_reward_7 = agent.average_reward
-
-
-    #Rewards plot
-    plt.figure(figsize = [8, 6])
-    plt.plot(average_reward_1, label = "e = 0")
-    plt.plot(average_reward_2, label = "e = 0.01")
-    plt.plot(average_reward_3, label = "e = 0.1")
-    plt.plot(average_reward_4, label = "e = 0.4")
-    plt.plot(average_reward_5, label = "UCB, c = 1")
-    plt.plot(average_reward_6, label = "UCB, c = 2")
-    plt.plot(average_reward_7, label = "UCB, c = 10")
-    plt.xlabel("Actions", fontsize = 10
-    plt.ylabel("Average Reward", fontsize = 10
+def plot_agents(name, param, stats, episodes):
+    fig = plt.figure(figsize = (16, 10))
+    ax = plt.subplot(111)
+    for i in param:
+        ax.plot(stats[i], label = str(i))
+    ax.legend(loc = 'lower right')
+    ax.set_xlabel("Episodes")
+    ax.set_ylabel("Rewards")
+    ax.set_title("Method: " + str(name))
     plt.show()
+
+it = 1000
+ep = 1000
+
+parameters_dict = {'eps': epsilon, 'q_0':Q_0, 'c':c}
+
+Start(parameters_dict, alg = 'e-greedy', iters = it, episodes = ep)
+Start(parameters_dict, alg = 'Optimistic', iters = it, episodes = ep)
+Start(parameters_dict, alg = 'UCB', iters = it, episodes = ep)
